@@ -67,7 +67,7 @@ jobs:
       contents: write
     steps:
       - name: download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.1.3
         with:
           name: Artifacts
           path: build/libs/
