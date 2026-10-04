@@ -6,8 +6,14 @@
 name: build
 on: [pull_request, push, workflow_dispatch]
 
+permissions:
+  contents: read
+
 jobs:
   build:
+    outputs:
+      mod_version: ${{ steps.version.outputs.mod_version }}
+      tag_name: ${{ steps.version.outputs.tag_name }}
     strategy:
       matrix:
         # Use these Java versions
@@ -27,6 +33,23 @@ jobs:
           distribution: 'microsoft'
       - name: make gradle wrapper executable
         run: chmod +x ./gradlew
+      - name: resolve release version
+        id: version
+        run: |
+          mod_version="$(awk -F= '/^[[:space:]]*mod_version[[:space:]]*=/{gsub(/[[:space:]]*/, "", $2); print $2; exit}' gradle.properties)"
+          if [ -z "$mod_version" ]; then
+            echo "mod_version is not defined in gradle.properties" >&2
+            exit 1
+          fi
+
+          if [[ "$mod_version" == v* ]]; then
+            tag_name="$mod_version"
+          else
+            tag_name="v$mod_version"
+          fi
+
+          echo "mod_version=$mod_version" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
       - name: build
         run: ./gradlew build
       - name: capture build artifacts
@@ -35,3 +58,38 @@ jobs:
         with:
           name: Artifacts
           path: build/libs/
+
+  release:
+    needs: build
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: Artifacts
+          path: build/libs/
+      - name: create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.build.outputs.tag_name }}
+          MOD_VERSION: ${{ needs.build.outputs.mod_version }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          shopt -s nullglob
+          assets=(build/libs/*)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No build artifacts found in build/libs/" >&2
+            exit 1
+          fi
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG_NAME" "${assets[@]}" \
+              --title "$TAG_NAME" \
+              --target "$TARGET_SHA" \
+              --notes "Automated release for version $MOD_VERSION"
+          fi
